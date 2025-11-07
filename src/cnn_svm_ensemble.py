@@ -3,6 +3,7 @@ import random
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
+from tensorflow.keras.layers import Input
 
 import kagglehub
 
@@ -117,7 +118,8 @@ print("Train:", X_train.shape, "Val:", X_val.shape)
 # 5. CNN model
 # =========================
 model = Sequential([
-    Conv2D(64, (3, 3), activation='relu', input_shape=X.shape[1:]),
+    Input(shape=X.shape[1:]),                 # <<< explicit input layer
+    Conv2D(64, (3, 3), activation='relu'),
     MaxPooling2D((2, 2)),
 
     Conv2D(64, (3, 3), activation='relu'),
@@ -127,8 +129,8 @@ model = Sequential([
     MaxPooling2D((2, 2)),
 
     Flatten(),
-    Dense(128, activation='relu'),     # feature layer
-    Dense(7, activation='softmax')     # output
+    Dense(128, activation='relu'),            # feature layer
+    Dense(7, activation='softmax')            # output
 ])
 
 model.compile(
@@ -176,7 +178,7 @@ print("Extracting features for SVM...")
 
 # Dense(128) is the second-to-last layer (-2)
 feature_extractor = Model(
-    inputs=model.input,
+    inputs=model.inputs,          # use .inputs for Sequential in Keras 3
     outputs=model.layers[-2].output
 )
 
