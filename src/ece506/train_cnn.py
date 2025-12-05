@@ -5,7 +5,7 @@ from .data import download_rafdb, load_train_data
 from .model import build_cnn
 
 
-def train_cnn(img_size=224, batch_size=64, epochs=30):
+def train_cnn(model_path= "models/fer_cnn_best.keras", img_size=224, batch_size=64, epochs=30):
     train_dir, _ = download_rafdb()
     X, y, cats = load_train_data(train_dir, img_size=img_size)
 
@@ -17,7 +17,7 @@ def train_cnn(img_size=224, batch_size=64, epochs=30):
     model = build_cnn(input_shape=X.shape[1:], n_classes=len(cats))
 
     ckpt = ModelCheckpoint(
-        "fer_cnn_best.keras",
+        model_path,
         monitor="val_accuracy",
         mode="max",
         save_best_only=True,
