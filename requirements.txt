@@ -1,0 +1,22 @@
+# Core
+numpy
+pandas
+
+# Image processing
+opencv-python
+
+# Deep learning / ML
+tensorflow
+scikit-learn
+
+# Plots / demos
+matplotlib
+
+# Datasets / model zoo
+kagglehub
+transformers
+torch
+torchvision
+
+# Utilities
+tqdm
