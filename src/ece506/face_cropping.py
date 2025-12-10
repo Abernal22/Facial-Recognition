@@ -39,7 +39,7 @@ def crop_face(image, x, y, w, h):
     return cropped
 
 
-# --- Load Image ---
+# Load Image ---
 image = fd.read_image('./Figures/elon.png')
 
 # --- Detect Faces ---
