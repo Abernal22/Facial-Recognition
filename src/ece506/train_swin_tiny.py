@@ -1,171 +1,288 @@
-"""
-train_swin_tiny.py
-Fine-tune Swin-Tiny on RAF-DB using Juan's custom data loaders.
-"""
-
+import os
+import time
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.optim import AdamW
-import timm
-from time import time
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from timm import create_model
+from data_processing import get_dataloader
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
-import data as dp
-
-
-# -------------------------------------------------------
-# Convert generator output (numpy) → torch batch
-# -------------------------------------------------------
-def to_torch_batch(X, y):
-    """
-    X: (N,H,W,3) float32
-    y: (N,)
-    returns X_torch: (N,3,H,W), y_torch
-    """
-    X = torch.tensor(X, dtype=torch.float32).permute(0, 3, 1, 2)
-    y = torch.tensor(y, dtype=torch.long)
-    return X, y
+MODELS_PATH = r"C:\Users\jlope\Downloads\UNM_Courses\Optimization_Theory\Project\Facial-Recognition\src\models"
+LOG_PATH    = r"C:\Users\jlope\Downloads\UNM_Courses\Optimization_Theory\Project\Facial-Recognition\src\logs"
 
 
-# -------------------------------------------------------
-# Build Swin-Tiny Model
-# -------------------------------------------------------
-def create_swin_tiny(num_classes):
-    model = timm.create_model(
+# To see logs: 
+# tensorboard --logdir "C:\Users\jlope\Downloads\UNM_Courses\Optimization_Theory\Project\Facial-Recognition\src\logs\runs"
+
+
+# ----------------------------
+# Training function
+# ----------------------------
+def train_swin_tiny(dataset_name="raf-db", img_size=224, batch_size=32, epochs=10, lr=3e-5):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Directories for saving
+    model_dir = os.path.join(MODELS_PATH, "saved_models")
+    os.makedirs(model_dir, exist_ok=True)
+
+    log_dir = os.path.join(LOG_PATH, "runs", dataset_name)
+    writer = SummaryWriter(log_dir=log_dir)
+
+    best_val_acc = 0.0  # Track the best validation accuracy
+
+    print("Training on:", device)
+
+    # ----------------------------
+    # Load dataset
+    # ----------------------------
+    print(f"Loading {dataset_name} dataset...")
+    train_loader = get_dataloader(
+        dataset_name, split="train", img_size=img_size,
+        batch_size=batch_size, shuffle=True, num_workers=2
+    )
+    val_loader = get_dataloader(
+        dataset_name, split="test", img_size=img_size,
+        batch_size=batch_size, shuffle=False, num_workers=2
+    )
+
+    # Determine number of classes dynamically
+    sample_batch = next(iter(train_loader))
+    num_classes = int(sample_batch[1].max().item()) + 1
+    print(f"Number of classes: {num_classes}")
+
+    # ----------------------------
+    # Create Swin-Tiny model
+    # ----------------------------
+    print("Creating Swin-Tiny model...")
+    model = create_model(
         "swin_tiny_patch4_window7_224",
         pretrained=True,
         num_classes=num_classes
-    )
-    return model
+    ).to(device)
 
+    # ----------------------------
+    # Class weights for imbalanced datasets
+    # ----------------------------
+    # Count occurrences in training data
+    class_counts = torch.zeros(num_classes, dtype=torch.int64)
+    for _, labels in train_loader:
+        for l in labels:
+            class_counts[l] += 1
+    inv_counts = 1.0 / class_counts.float()
+    weights = inv_counts / inv_counts.sum()
+    weights = weights.to(device)
 
-# -------------------------------------------------------
-# Evaluation loop
-# -------------------------------------------------------
-def evaluate(model, gen, criterion, device="cuda"):
-    model.eval()
-    total, correct, loss_sum = 0, 0, 0
+    criterion = nn.CrossEntropyLoss(weight=weights)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    with torch.no_grad():
-        for X_np, y_np, _ in gen:
-            X, y = to_torch_batch(X_np, y_np)
-            X, y = X.to(device), y.to(device)
-
-            out = model(X)
-            loss = criterion(out, y)
-
-            preds = out.argmax(1)
-            correct += (preds == y).sum().item()
-            loss_sum += loss.item() * len(X_np)
-            total += len(X_np)
-
-    return loss_sum / total, correct / total
-
-
-# -------------------------------------------------------
-# Training loop
-# -------------------------------------------------------
-def train(model, train_gen, val_gen, epochs, lr, device="cuda"):
-
-    model = model.to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-
+    # ----------------------------
+    # Training loop
+    # ----------------------------
     for epoch in range(1, epochs + 1):
+        t0 = time.time()
 
+        # Train
         model.train()
-        t0 = time()
-        running_loss = 0
-        total_correct = 0
-        total_samples = 0
-
-        print(f"\n--- Epoch {epoch}/{epochs} ---")
-
-        for X_np, y_np, _ in train_gen:
-
-            X, y = to_torch_batch(X_np, y_np)
-            X, y = X.to(device), y.to(device)
-
+        train_loss, train_correct, total = 0.0, 0, 0
+        for imgs, labels in tqdm(train_loader, desc=f"Epoch {epoch}/{epochs} [Train]"):
+            imgs, labels = imgs.to(device), labels.to(device)
             optimizer.zero_grad()
-            out = model(X)
-            loss = criterion(out, y)
+            outputs = model(imgs)
+            loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
 
-            preds = out.argmax(1)
-            total_correct += (preds == y).sum().item()
-            running_loss += loss.item() * len(X_np)
-            total_samples += len(X_np)
+            train_loss += loss.item() * imgs.size(0)
+            train_correct += (outputs.argmax(1) == labels).sum().item()
+            total += imgs.size(0)
 
-        # Epoch metrics
-        train_acc = total_correct / total_samples
-        train_loss = running_loss / total_samples
+        train_loss /= total
+        train_acc = train_correct / total
 
         # Validation
-        val_loss, val_acc = evaluate(model, val_gen, criterion, device)
+        model.eval()
+        val_loss, val_correct, val_total = 0.0, 0, 0
+        with torch.no_grad():
+            for imgs, labels in tqdm(val_loader, desc=f"Epoch {epoch}/{epochs} [Val]"):
+                imgs, labels = imgs.to(device), labels.to(device)
+                outputs = model(imgs)
+                loss = criterion(outputs, labels)
+                val_loss += loss.item() * imgs.size(0)
+                val_correct += (outputs.argmax(1) == labels).sum().item()
+                val_total += imgs.size(0)
 
+        val_loss /= val_total
+        val_acc = val_correct / val_total
+
+        # ----------------------------
+        # Log to TensorBoard
+        # ----------------------------
+        writer.add_scalar("Loss/Train", train_loss, epoch)
+        writer.add_scalar("Loss/Val", val_loss, epoch)
+        writer.add_scalar("Accuracy/Train", train_acc, epoch)
+        writer.add_scalar("Accuracy/Val", val_acc, epoch)
+
+        # ----------------------------
+        # Save best model only
+        # ----------------------------
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_model_path = os.path.join(model_dir, f"swin_tiny_{dataset_name}_best.pth")
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "train_loss": train_loss,
+                "train_acc": train_acc,
+                "val_loss": val_loss,
+                "val_acc": val_acc
+            }, best_model_path)
+            print(f"New best model saved: {best_model_path}")
+
+
+
+        print(f"\n--- Epoch {epoch}/{epochs} ---")
         print(f"Train Loss: {train_loss:.4f}   Train Acc: {train_acc:.4f}")
         print(f"Val   Loss: {val_loss:.4f}   Val   Acc: {val_acc:.4f}")
-        print(f"Time per epoch: {time() - t0:.1f} sec")
+        print(f"Time per epoch: {time.time() - t0:.1f} sec\n")
+    writer.close()
 
-    return model
 
-
-# -------------------------------------------------------
-# Main
-# -------------------------------------------------------
-def main():
-
-    # ---------------------------
-    # 1. Load RAF-DB using your pipeline
-    # ---------------------------
-    train_dir, test_dir = dp.download_rafdb()
-
-    num_classes = 7   # RAF-DB emotions (fixed)
-    img_size = 224
-    batch_size = 32
-
-    train_gen = dp.folder_image_generator(
-        train_dir,
-        img_size=img_size,
-        batch_size=batch_size,
-        shuffle=True
-    )
-
-    val_gen = dp.folder_image_generator(
-        test_dir,
-        img_size=img_size,
-        batch_size=batch_size,
-        shuffle=False
-    )
-
-    # ---------------------------
-    # 2. Create model
-    # ---------------------------
-    print("Creating Swin-Tiny model...")
-    model = create_swin_tiny(num_classes)
-
-    # ---------------------------
-    # 3. Train
-    # ---------------------------
+def train_vit_tiny(dataset_name="raf-db", img_size=224, batch_size=32, epochs=10, lr=3e-5):
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Directories for saving
+    model_dir = os.path.join(MODELS_PATH, "saved_models")
+    os.makedirs(model_dir, exist_ok=True)
+
+    log_dir = os.path.join(LOG_PATH, "runs", dataset_name + "_vit_tiny")
+    writer = SummaryWriter(log_dir=log_dir)
+
+    best_val_acc = 0.0  # Track the best validation accuracy
+
     print("Training on:", device)
 
-    model = train(
-        model,
-        train_gen=train_gen,
-        val_gen=val_gen,
-        epochs=10,
-        lr=3e-4,
-        device=device
+    # ----------------------------
+    # Load dataset
+    # ----------------------------
+    print(f"Loading {dataset_name} dataset...")
+    train_loader = get_dataloader(
+        dataset_name, split="train", img_size=img_size,
+        batch_size=batch_size, shuffle=True, num_workers=2
+    )
+    val_loader = get_dataloader(
+        dataset_name, split="test", img_size=img_size,
+        batch_size=batch_size, shuffle=False, num_workers=2
     )
 
-    # ---------------------------
-    # 4. Save model
-    # ---------------------------
-    torch.save(model.state_dict(), "swin_tiny_rafdb.pth")
-    print("\nModel saved to swin_tiny_rafdb.pth")
+    # Determine number of classes dynamically
+    sample_batch = next(iter(train_loader))
+    num_classes = 7
+    print(f"Number of classes: {num_classes}")
+
+    # ----------------------------
+    # Create ViT-Tiny model
+    # ----------------------------
+    print("Creating ViT-Tiny model...")
+    model = create_model(
+        "vit_tiny_patch16_224",
+        pretrained=True,
+        num_classes=num_classes
+    ).to(device)
+
+    # ----------------------------
+    # Class weights for imbalanced datasets
+    # ----------------------------
+    class_counts = torch.zeros(num_classes, dtype=torch.int64)
+    for _, labels in train_loader:
+        for l in labels:
+            class_counts[l] += 1
+
+    inv_counts = 1.0 / class_counts.float()
+    weights = inv_counts / inv_counts.sum()
+    weights = weights.to(device)
+
+    criterion = nn.CrossEntropyLoss(weight=weights)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    # ----------------------------
+    # Training loop
+    # ----------------------------
+    for epoch in range(1, epochs + 1):
+        t0 = time.time()
+
+        # Training
+        model.train()
+        train_loss, train_correct, total = 0.0, 0, 0
+        for imgs, labels in tqdm(train_loader, desc=f"Epoch {epoch}/{epochs} [Train]"):
+            imgs, labels = imgs.to(device), labels.to(device)
+
+            optimizer.zero_grad()
+            outputs = model(imgs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item() * imgs.size(0)
+            train_correct += (outputs.argmax(1) == labels).sum().item()
+            total += imgs.size(0)
+
+        train_loss /= total
+        train_acc = train_correct / total
+
+        # Validation
+        model.eval()
+        val_loss, val_correct, val_total = 0.0, 0, 0
+        with torch.no_grad():
+            for imgs, labels in tqdm(val_loader, desc=f"Epoch {epoch}/{epochs} [Val]"):
+                imgs, labels = imgs.to(device), labels.to(device)
+                outputs = model(imgs)
+                loss = criterion(outputs, labels)
+
+                val_loss += loss.item() * imgs.size(0)
+                val_correct += (outputs.argmax(1) == labels).sum().item()
+                val_total += imgs.size(0)
+
+        val_loss /= val_total
+        val_acc = val_correct / val_total
+
+        # ----------------------------
+        # Log to TensorBoard
+        # ----------------------------
+        writer.add_scalar("Loss/Train", train_loss, epoch)
+        writer.add_scalar("Loss/Val", val_loss, epoch)
+        writer.add_scalar("Accuracy/Train", train_acc, epoch)
+        writer.add_scalar("Accuracy/Val", val_acc, epoch)
+
+        # ----------------------------
+        # Save best model only
+        # ----------------------------
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_model_path = os.path.join(model_dir, f"vit_tiny_{dataset_name}_best.pth")
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "train_loss": train_loss,
+                "train_acc": train_acc,
+                "val_loss": val_loss,
+                "val_acc": val_acc
+            }, best_model_path)
+            print(f"New best ViT model saved: {best_model_path}")
+
+        print(f"\n--- Epoch {epoch}/{epochs} ---")
+        print(f"Train Loss: {train_loss:.4f}   Train Acc: {train_acc:.4f}")
+        print(f"Val   Loss: {val_loss:.4f}   Val   Acc: {val_acc:.4f}")
+        print(f"Time per epoch: {time.time() - t0:.1f} sec\n")
+
+    writer.close()
+
 
 
 if __name__ == "__main__":
-    main()
+    # Example usage: train on RAF-DB
+    # train_swin_tiny(dataset_name="fer2013", img_size=224, batch_size=32, epochs=10, lr=3e-5)
+
+    train_vit_tiny(dataset_name="fer2013", img_size=224, batch_size=32, epochs=10, lr=3e-5)
