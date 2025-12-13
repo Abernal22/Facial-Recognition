@@ -44,9 +44,29 @@ Datasets are expected to be organized into class-specific directories, where eac
 
 Large datasets and preprocessed feature files are intentionally kept **outside of version control** and stored locally.
 
-### Label Mapping
+### Dataset Comparison
 
-Different datasets may use different naming conventions for emotion classes. The training pipeline supports a configurable label-mapping mechanism that maps dataset-specific labels into a consistent 7-class format. This ensures fair and consistent comparisons across datasets.
+| Dataset | Number of Images | Environment | Expressions | Annotation Method |
+|-------|------------------|-------------|-------------|-------------------|
+| RAF-DB | ~29,672 | In-the-wild (Web) | 7 emotions | ~40 annotators per image, majority voting |
+| FER2013 | ~35,887 | In-the-wild (Web) | 7 emotions | Auto-collected, refined via keyword queries and manual cleaning |
+| CK+ | ~593 sequences (~981 images) | Lab-controlled | 7 emotions | Two certified FACS coders |
+
+---
+
+## Standardized Emotion Class Mapping
+
+To enable fair cross-dataset evaluation, all datasets were mapped to a unified 7-class emotion label space.
+
+| Standard Index | Emotion | CK+ Label | RAF-DB Label | FER2013 Label |
+|---------------|---------|-----------|--------------|---------------|
+| 0 | Anger | Anger | 6 | `angry` |
+| 1 | Disgust | Disgust | 3 | `disgust` |
+| 2 | Fear | Fear | 2 | `fear` |
+| 3 | Happiness | Happiness | 4 | `happy` |
+| 4 | Sadness | Sadness | 5 | `sad` |
+| 5 | Surprise | Surprise | 1 | `surprise` |
+| 6 | Neutral | Neutral | 7 | `neutral` |
 
 ---
 
@@ -80,9 +100,17 @@ Transformer experiments are implemented using a PyTorch-based pipeline and inclu
 
 CNN models are trained using **Stratified K-Fold cross-validation**, which preserves class balance across folds. This approach is particularly important for smaller datasets such as CK+.
 
-### Dynamic Regularization
+### Hyperparameter Selection Strategy
 
-Regularization strategies are adjusted automatically based on dataset size. Smaller datasets apply stronger regularization and freeze base layers, while larger datasets allow more extensive fine-tuning of pretrained weights.
+Hyperparameters are selected dynamically based on dataset size.
+
+| Hyperparameter | Small Dataset (≤ 2000 samples) | Large Dataset (> 2000 samples) |
+|---------------|-------------------------------|--------------------------------|
+| Dense Layer Size | 128 | 256 |
+| Dropout Rate | 0.7 | 0.7 |
+| L2 Regularization | 0.01 | 0.01 |
+| Learning Rate | 5 × 10⁻⁵ | 2 × 10⁻⁵ |
+| Freeze Base Model | True | False |
 
 ### Model Selection and Checkpointing
 
@@ -118,8 +146,31 @@ For reproducibility and repository size considerations, trained model artifacts 
 - VGG16
 - InceptionV3
 
-Each experiment was trained using stratified K-fold cross-validation with early stopping and checkpointing.  
-Final validation accuracies and best-performing folds were recorded and summarized in CSV format.
+---
+
+## Results Summary
+
+### CNN Performance (5-Fold Cross-Validation)
+
+| Model | Avg Train Acc (%) | Avg Val Acc (%) | Avg Val Loss | Best Epoch |
+|------|-------------------|------------------|--------------|------------|
+| VGG16 | 87.29 | 68.08 | 1.279 | 45 |
+| MobileNetV3Small | 65.05 | 61.49 | 1.278 | 45 |
+| EfficientNetB0 | 75.67 | 66.93 | 1.076 | 43 |
+| ResNet50 | 82.42 | 67.85 | 1.058 | 45 |
+
+### Validation and OOD Performance (AffectNet)
+
+| Method | RAF-DB Acc | FER2013 Acc | CK+ Acc | OOD Acc | Macro-F1 |
+|------|------------|-------------|---------|---------|----------|
+| ResNet-18 | 67.9 | 65.0 | 64.0 | 55.2 | 52.8 |
+| MobileNetV3Small | 61.5 | 54.5 | 63.0 | 49.6 | 46.9 |
+| EfficientNetB0 | 66.9 | 64.8 | 66.0 | 57.1 | 54.6 |
+| ViT-Tiny/16 | 68.5 | 66.2 | 65.4 | 58.3 | 55.9 |
+| Swin-Tiny Transformer | 69.2 | 67.0 | 66.1 | 59.0 | 56.8 |
+| CNN-only Ensemble | 70.6 | 68.1 | 67.4 | 60.8 | 58.6 |
+| Transformer-only Ensemble | 71.3 | 69.0 | 68.2 | 62.1 | 60.2 |
+| Hybrid Ensemble | **73.8** | **71.5** | **70.6** | **65.4** | **63.7** |
 
 ---
 
@@ -131,4 +182,3 @@ Install dependencies using:
 
 ```bash
 pip install -r requirements.txt
-
